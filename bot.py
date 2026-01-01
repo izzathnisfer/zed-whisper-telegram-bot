@@ -60,8 +60,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text="👋 I am ready! Send me a voice note, and I will transcribe it instantly using Groq."
     )
 
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Main function: Receives voice -> Transcribes -> Replies."""
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Main function: Receives Voice/Audio/Video -> Transcribes -> Replies."""
     if not is_authorized(update):
         logger.warning(f"Unauthorized access attempt from User ID: {update.effective_user.id}")
         return
@@ -72,18 +72,38 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     voice_file_path = None
     
     try:
-        # A. Download Voice File
-        voice = update.message.voice
-        file_id = voice.file_id
+        # A. Detect Media Type & Get File ID
+        file_id = None
+        file_ext = ".ogg" # Default
+
+        message = update.message
+        if message.voice:
+            file_id = message.voice.file_id
+            file_ext = ".ogg"
+            logger.info(f"Processing Voice Note from {update.effective_user.first_name}")
+        elif message.audio:
+            file_id = message.audio.file_id
+            file_ext = ".mp3" # Generic audio container
+            logger.info(f"Processing Audio File from {update.effective_user.first_name}")
+        elif message.video:
+            file_id = message.video.file_id
+            file_ext = ".mp4"
+            logger.info(f"Processing Video from {update.effective_user.first_name}")
+        elif message.video_note:
+            file_id = message.video_note.file_id
+            file_ext = ".mp4"
+            logger.info(f"Processing Video Note from {update.effective_user.first_name}")
+        else:
+            await update.message.reply_text("⚠️ Unknown media type.")
+            return
+
         new_file = await context.bot.get_file(file_id)
         
-        # Create a temporary file to save the audio
-        # We use .ogg as Telegram voice notes are usually OGG Opus
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as temp_file:
+        # Create a temporary file to save the media
+        with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
             voice_file_path = temp_file.name
             
         await new_file.download_to_drive(voice_file_path)
-        logger.info(f"Downloaded voice note from {update.effective_user.first_name}")
 
         # B. Transcribe with Groq
         # Open file in binary read mode
@@ -106,7 +126,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"`{text_result}`", parse_mode='Markdown')
 
     except Exception as e:
-        logger.error(f"Error processing voice: {e}")
+        logger.error(f"Error processing media: {e}")
         await update.message.reply_text("❌ An error occurred during transcription.")
         
     finally:
@@ -119,11 +139,12 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
     start_handler = CommandHandler('start', start)
-    # Filter for VOICE messages only
-    voice_handler = MessageHandler(filters.VOICE, handle_voice)
+    # Filter for ALL audio/video types
+    media_filter = filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE
+    media_handler = MessageHandler(media_filter, handle_media)
     
     application.add_handler(start_handler)
-    application.add_handler(voice_handler)
+    application.add_handler(media_handler)
     
     logger.info("Bot is polling...")
     application.run_polling()
