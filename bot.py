@@ -102,7 +102,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text_result:
             await update.message.reply_text("⚠️ Could not hear any speech.")
         else:
-            await update.message.reply_text(f"`{text_result}`")
+            # Send as a code block (monospaced) for easy copying
+            await update.message.reply_text(f"```\n{text_result}\n```", parse_mode='Markdown')
 
     except Exception as e:
         logger.error(f"Error processing voice: {e}")
