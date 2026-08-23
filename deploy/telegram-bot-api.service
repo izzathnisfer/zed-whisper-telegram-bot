@@ -1,0 +1,36 @@
+[Unit]
+Description=Local Telegram Bot API Server
+Documentation=https://github.com/tdlib/telegram-bot-api
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f telegram-bot-api
+ExecStart=/usr/bin/docker run --rm --name telegram-bot-api \
+    --pull=never \
+    --publish 127.0.0.1:8081:8081 \
+    --volume /var/lib/telegram-bot-api:/var/lib/telegram-bot-api \
+    --env-file /etc/zed-whisper-bot/telegram-bot-api.env \
+    --env TELEGRAM_LOCAL=1 \
+    --memory 512m \
+    --cpus 1.0 \
+    --pids-limit 256 \
+    --cap-drop ALL \
+    --cap-add CHOWN \
+    --cap-add SETUID \
+    --cap-add SETGID \
+    --security-opt no-new-privileges=true \
+    --log-driver local \
+    --log-opt max-size=10m \
+    --log-opt max-file=3 \
+    aiogram/telegram-bot-api@sha256:d517bd47a1e088475939bac16c514687559bebbe5c30ac8e02cf60b09a9a34b2
+ExecStop=/usr/bin/docker stop --time 20 telegram-bot-api
+Restart=always
+RestartSec=5
+TimeoutStartSec=90
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
