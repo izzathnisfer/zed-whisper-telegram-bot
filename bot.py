@@ -471,6 +471,11 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 duration,
                 retry_callback=keep_typing,
             )
+            if not await cleanup_file(downloaded_path, "working media copy"):
+                raise PrivacyCleanupError(
+                    "Could not delete the working media copy after transcription"
+                )
+            downloaded_path = None
             if not text_result:
                 await update.message.reply_text("⚠️ Could not hear any speech.")
             else:
@@ -524,6 +529,11 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"{estimated_parts} ordered parts…"
             )
             chunks = await split_media(downloaded_path, chunk_directory)
+            if not await cleanup_file(downloaded_path, "source working media"):
+                raise PrivacyCleanupError(
+                    "Could not delete source media after creating private chunks"
+                )
+            downloaded_path = None
             transcribed_parts = []
 
             for index, chunk_path in enumerate(chunks, start=1):
@@ -564,14 +574,22 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     f"Hourly audio: [{progress_bar(projected, snapshot.audio_hour.limit)}] "
                     f"{format_duration(projected)} / 2h"
                 )
-                transcribed_parts.append(
-                    await transcribe_file(
+                try:
+                    part_text = await transcribe_file(
                         chunk_path,
                         chunk_duration,
                         show_wait,
                         show_retry,
                     )
-                )
+                finally:
+                    chunk_deleted = await cleanup_file(
+                        chunk_path, "processed audio chunk"
+                    )
+                    if not chunk_deleted:
+                        raise PrivacyCleanupError(
+                            "Could not delete a processed audio chunk"
+                        )
+                transcribed_parts.append(part_text)
                 await progress_message.edit_text(
                     f"✅ Transcribed part {index}/{len(chunks)}\n"
                     f"Completed: {index}/{len(chunks)}"
@@ -612,8 +630,8 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except PrivacyCleanupError:
         logger.error("Privacy cleanup failed; transcription was aborted")
         message = (
-            "❌ Transcription stopped because the bot could not immediately delete "
-            "Telegram’s cached audio copy. No audio was sent to Groq."
+            "❌ Privacy protection stopped this job because an audio file could not "
+            "be deleted immediately. Processing has stopped."
         )
         if progress_message:
             await progress_message.edit_text(message)
