@@ -1,88 +1,91 @@
-# 🎙️ Private Groq-Powered Telegram Bot
+# Private Groq-Powered Telegram Transcription Bot
 
-A high-performance, privacy-focused speech-to-text bot that runs on AWS Free Tier.
-It uses **Groq's API** (`whisper-large-v3-turbo`) for instant transcription and **AWS EC2** (`t2.micro`) for hosting.
+A private Telegram bot that transcribes voice notes, audio, and video using
+Groq's `whisper-large-v3-turbo` model.
 
-## 🚀 Features
-*   **Instant Transcription**: Responses in < 2 seconds.
-*   **Privacy First**: Audio files are deleted immediately after processing.
-*   **Zero Cost**: Runs on AWS Free Tier + Groq Free Developer Tier.
-*   **Secure**: Includes an authorization check so ONLY YOU can use it.
+## Features
 
-## 🛠️ Setup Guide (AWS EC2)
+- Owner-only access through `ALLOWED_USER_ID`
+- Normal copyable Telegram replies for media up to five minutes
+- Ordered five-minute chunks and a merged `.txt` result for longer media
+- Live progress updates while long recordings are prepared and transcribed
+- Persistent local tracking of all four Groq free-plan limits
+- Automatic short pauses for the 20-requests-per-minute limit
+- A two-hour maximum for one transcription job
+- Temporary media is deleted after every attempt
 
-### Prerequisites
-1.  **Telegram Bot Token**: Get it from [@BotFather](https://t.me/BotFather).
-2.  **Groq API Key**: Get it from [Groq Console](https://console.groq.com/keys).
-3.  **Telegram User ID**: Get it from [@userinfobot](https://t.me/userinfobot) (to lock the bot to your account).
+## Commands
 
-### 1. Launch AWS Instance
-1.  Go to AWS Console -> EC2 -> Launch Instance.
-2.  Name: `WhisperBot`.
-3.  OS: **Ubuntu** (important for the script).
-4.  Instance Type: `t2.micro` (Free Tier).
-5.  Key Pair: Create a new one and download it (e.g., `my-key.pem`).
-6.  Security: Allow SSH traffic.
-7.  **Launch Instance**.
+- `/start` — show the welcome message
+- `/usage` — show the primary two-hours-per-rolling-hour audio meter
+- `/usage_detailed` — show audio/hour, audio/day, requests/minute, and
+  requests/day with progress bars and remaining capacity
 
-### 2. Connect to Server
-On your specific computer (Windows/Mac), open your terminal:
+Usage is stored in `data/groq_usage.sqlite3` by default and survives bot
+restarts. Tracking begins when this version first starts; it cannot reconstruct
+requests made before installation or requests made outside this bot.
+
+## Groq free-plan limits used by the bot
+
+| Limit | Allowance | Five-minute chunks |
+| --- | ---: | ---: |
+| Requests/minute | 20 | 20 |
+| Requests/day | 2,000 | 2,000 |
+| Audio/hour | 7,200 seconds (2 hours) | 24 |
+| Audio/day | 28,800 seconds (8 hours) | 96 |
+
+The audio/hour allowance is treated as the main limit. All counters use
+conservative rolling windows and update automatically as recorded attempts age
+out. Audio shorter than ten seconds is counted as ten seconds.
+
+## Requirements
+
+- Ubuntu or Debian Linux
+- Python 3.9+
+- FFmpeg and FFprobe
+- Telegram bot token
+- Groq API key
+- Your Telegram user ID
+
+## Install
 
 ```bash
-# Set permissions for your key (Mac/Linux only)
-chmod 400 my-key.pem
-
-# SSH into the server (replace IP with your instance's Public IP)
-ssh -i "path/to/my-key.pem" ubuntu@12.34.56.78
-```
-
-### 3. Deploy Code (One-Step)
-Once inside the AWS terminal, run these commands:
-
-```bash
-# 1. Clone the code (or upload files) - Assuming you created the files via SCP or manually
-# If creating manually:
-mkdir whisper-bot
-cd whisper-bot
-nano setup.sh # Paste the content of setup.sh
-nano bot.py # Paste content
-nano requirements.txt # Paste content
-nano .env.example # Paste content
-
-# 2. Run the Auto-Installer
+git clone https://github.com/izzathnisfer/zed-whisper-telegram-bot.git
+cd zed-whisper-telegram-bot
 chmod +x setup.sh
 ./setup.sh
 ```
 
-### 4. Configure & Start
-The installer will tell you to edit the `.env` file.
+Copy the environment template, add the three private values, then start the
+service:
 
 ```bash
-# 1. Edit config
+cp .env.example .env
 nano .env
-
-# Paste your keys:
-# TELEGRAM_BOT_TOKEN=...
-# GROQ_API_KEY=...
-# ALLOWED_USER_ID=...
-# (Ctrl+X, then Y, then Enter to save)
-
-# 2. Start the bot
-sudo systemctl start telegram-whisper
-
-# 3. Check if it's running
-sudo systemctl status telegram-whisper
+sudo systemctl start zed-whisper-bot
+sudo systemctl status zed-whisper-bot
 ```
 
-Your bot is now live! 🟢
+Never commit `.env`; it is ignored by Git.
 
-## 📜 Maintenance
+## Telegram file-size note
 
-*   **View Logs** (if something goes wrong):
-    ```bash
-    journalctl -u telegram-whisper -f
-    ```
-*   **Restart Bot**:
-    ```bash
-    sudo systemctl restart telegram-whisper
-    ```
+Telegram's hosted Bot API only permits bots to download files up to 20 MB.
+Long audio that stays under 20 MB can be chunked normally. For larger files,
+run a separate Local Telegram Bot API server and configure:
+
+```dotenv
+TELEGRAM_LOCAL_MODE=true
+TELEGRAM_BASE_URL=http://127.0.0.1:8081/bot
+TELEGRAM_BASE_FILE_URL=http://127.0.0.1:8081/file/bot
+```
+
+The Local Bot API server requires a private Telegram `API_ID` and `API_HASH`.
+Keep them in the server's private environment, never in this repository.
+
+## Maintenance
+
+```bash
+journalctl -u zed-whisper-bot -f
+sudo systemctl restart zed-whisper-bot
+```

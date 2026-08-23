@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e  # Exit immediately if a command exits with a non-zero status
 
-# Deployment Script for Groq Whisper Bot on Ubuntu/Debian EC2
+# Deployment script for the Groq Whisper bot on Ubuntu/Debian
 
 echo "Starting automated setup..."
 
@@ -39,7 +39,7 @@ fi
 # This allows the bot to run 24/7 and restart if the server reboots
 echo "5. Creating Systemd Service..."
 
-SERVICE_FILE="/etc/systemd/system/telegram-whisper.service"
+SERVICE_FILE="/etc/systemd/system/zed-whisper-bot.service"
 CURRENT_DIR=$(pwd)
 USER_NAME=$(whoami)
 PYTHON_PATH="$CURRENT_DIR/venv/bin/python"
@@ -67,7 +67,7 @@ echo "   Service file created at $SERVICE_FILE"
 # 6. Enable and Start Service
 echo "6. Activating Service..."
 sudo systemctl daemon-reload
-sudo systemctl enable telegram-whisper.service
+sudo systemctl enable zed-whisper-bot.service
 # We don't start it yet because the user needs to edit the .env file first
 
 echo "----------------------------------------------------------------"
@@ -75,7 +75,7 @@ echo "✅ Setup Complete!"
 echo "----------------------------------------------------------------"
 echo "NEXT STEPS:"
 echo "1. Edit your configuration:  nano .env"
-echo "2. Start the bot:            sudo systemctl start telegram-whisper"
-echo "3. Check status:             sudo systemctl status telegram-whisper"
-echo "4. View logs:                journalctl -u telegram-whisper -f"
+echo "2. Start the bot:            sudo systemctl start zed-whisper-bot"
+echo "3. Check status:             sudo systemctl status zed-whisper-bot"
+echo "4. View logs:                journalctl -u zed-whisper-bot -f"
 echo "----------------------------------------------------------------"
