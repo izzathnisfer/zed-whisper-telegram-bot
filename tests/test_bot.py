@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import shutil
 import subprocess
@@ -30,6 +31,10 @@ class BotHelperTests(unittest.TestCase):
         self.assertEqual(bot.progress_bar(3_600, 7_200), "██████░░░░░░")
         self.assertEqual(bot.format_duration(7_200), "2h 0m")
         self.assertEqual(bot.format_duration(305), "5m 5s")
+
+    def test_http_client_does_not_log_token_bearing_urls(self):
+        self.assertGreaterEqual(logging.getLogger("httpx").level, logging.WARNING)
+        self.assertGreaterEqual(logging.getLogger("httpcore").level, logging.WARNING)
 
     @unittest.skipUnless(
         shutil.which("ffmpeg") and shutil.which("ffprobe"),

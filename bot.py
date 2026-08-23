@@ -55,6 +55,10 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+# HTTPX logs Telegram API URLs at INFO level, and those URLs contain the bot
+# token. Keep request URLs out of application logs without hiding bot errors.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 if not BOT_TOKEN or not GROQ_API_KEY:
     logger.error("Error: Bot token or Groq API key missing in .env")
