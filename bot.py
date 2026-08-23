@@ -2,13 +2,14 @@ import asyncio
 import logging
 import math
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, Tuple
 
 from dotenv import load_dotenv
-from groq import Groq
+from groq import AsyncGroq
 from telegram import InputFile, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -32,6 +33,9 @@ GROQ_MODEL = "whisper-large-v3-turbo"
 CHUNK_SECONDS = 5 * 60
 TELEGRAM_DOWNLOAD_LIMIT_BYTES = 20_000_000
 MAX_AUTOMATIC_LIMIT_WAIT_SECONDS = 70
+GROQ_MAX_ATTEMPTS = 4
+MEDIA_JOB_CONCURRENCY = 2
+UPDATE_CONCURRENCY = 8
 
 PROJECT_DIR = Path(__file__).resolve().parent
 USAGE_DB_PATH = os.getenv(
@@ -49,6 +53,9 @@ TELEGRAM_BASE_URL = os.getenv("TELEGRAM_BASE_URL", "http://127.0.0.1:8081/bot")
 TELEGRAM_BASE_FILE_URL = os.getenv(
     "TELEGRAM_BASE_FILE_URL", "http://127.0.0.1:8081/file/bot"
 )
+TELEGRAM_LOCAL_DATA_DIR = Path(
+    os.getenv("TELEGRAM_LOCAL_DATA_DIR", "/var/lib/telegram-bot-api")
+).resolve()
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -64,8 +71,11 @@ if not BOT_TOKEN or not GROQ_API_KEY:
     logger.error("Error: Bot token or Groq API key missing in .env")
     raise SystemExit(1)
 
-client = Groq(api_key=GROQ_API_KEY)
+# Hidden SDK retries make local request accounting inaccurate. Every retry is
+# performed explicitly below and atomically recorded before its HTTP request.
+client = AsyncGroq(api_key=GROQ_API_KEY, max_retries=0)
 usage_tracker = UsageTracker(USAGE_DB_PATH)
+media_job_semaphore = asyncio.Semaphore(MEDIA_JOB_CONCURRENCY)
 
 
 # 2. Security & Helper Functions ----------------------------------------------
@@ -73,6 +83,10 @@ class UsageLimitUnavailable(Exception):
     def __init__(self, wait_seconds: float):
         super().__init__(f"Groq capacity becomes available in {wait_seconds:.0f}s")
         self.wait_seconds = wait_seconds
+
+
+class PrivacyCleanupError(Exception):
+    """Raised when a Local Bot API media cache file cannot be removed."""
 
 
 def is_authorized(update: Update) -> bool:
@@ -83,16 +97,32 @@ def is_authorized(update: Update) -> bool:
     return str(user_id) == str(ALLOWED_USER_ID)
 
 
-async def cleanup_file(path: Optional[str]) -> None:
-    """Securely remove a temporary media file."""
-    if not path:
-        return
+def get_local_cache_path(file_path: object) -> Optional[str]:
+    """Return an approved Local Bot API cache path without exposing its name."""
+    if not TELEGRAM_LOCAL_MODE or not file_path:
+        return None
+    candidate = Path(str(file_path))
+    if not candidate.is_absolute():
+        return None
+    resolved = candidate.resolve(strict=False)
     try:
-        if os.path.exists(path):
-            os.remove(path)
-            logger.info("Deleted temporary file: %s", path)
+        resolved.relative_to(TELEGRAM_LOCAL_DATA_DIR)
+    except ValueError:
+        return None
+    return str(resolved)
+
+
+async def cleanup_file(path: Optional[str], label: str = "temporary media") -> bool:
+    """Immediately unlink a media file without logging its sensitive path."""
+    if not path:
+        return True
+    try:
+        Path(path).unlink(missing_ok=True)
+        logger.info("Deleted %s", label)
+        return True
     except OSError as exc:
-        logger.error("Failed to delete file %s: %s", path, exc)
+        logger.error("Failed to delete %s (%s)", label, type(exc).__name__)
+        return False
 
 
 def format_duration(seconds: float) -> str:
@@ -179,7 +209,10 @@ async def probe_duration(path: str, fallback: Optional[float] = None) -> float:
 
 
 async def split_media(input_path: str, output_directory: str) -> list[str]:
-    output_pattern = str(Path(output_directory) / "chunk_%04d.flac")
+    # Re-encode instead of segmenting the original container. Groq has returned
+    # HTTP 500 for segmented FLAC files even when FFprobe can read them; a mono,
+    # constant-bitrate MP3 is both small and broadly accepted by the endpoint.
+    output_pattern = str(Path(output_directory) / "chunk_%04d.mp3")
     process = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-hide_banner",
@@ -196,7 +229,11 @@ async def split_media(input_path: str, output_directory: str) -> list[str]:
         "-ar",
         "16000",
         "-c:a",
-        "flac",
+        "libmp3lame",
+        "-b:a",
+        "32k",
+        "-map_metadata",
+        "-1",
         "-f",
         "segment",
         "-segment_time",
@@ -211,44 +248,86 @@ async def split_media(input_path: str, output_directory: str) -> list[str]:
     if process.returncode != 0:
         raise RuntimeError(f"ffmpeg could not split the media: {stderr.decode().strip()}")
 
-    chunks = sorted(str(path) for path in Path(output_directory).glob("chunk_*.flac"))
+    chunks = sorted(str(path) for path in Path(output_directory).glob("chunk_*.mp3"))
     if not chunks:
         raise RuntimeError("ffmpeg did not produce any audio chunks")
     return chunks
 
 
-def _groq_transcription(path: str):
-    with open(path, "rb") as audio_file:
-        return client.audio.transcriptions.create(
-            file=(os.path.basename(path), audio_file.read()),
-            model=GROQ_MODEL,
-            response_format="json",
-            language=None,
-            temperature=0.0,
-        )
+async def _groq_transcription(filename: str, audio_bytes: bytes):
+    return await client.audio.transcriptions.create(
+        file=(filename, audio_bytes),
+        model=GROQ_MODEL,
+        response_format="json",
+        language=None,
+        temperature=0.0,
+    )
 
 
 async def transcribe_file(
     path: str,
     audio_seconds: float,
     wait_callback: Optional[Callable[[float], Awaitable[None]]] = None,
+    retry_callback: Optional[Callable[[int, int, float], Awaitable[None]]] = None,
 ) -> str:
-    """Respect locally tracked limits, record the attempt, then call Groq."""
-    while True:
-        wait_seconds = await asyncio.to_thread(
-            usage_tracker.seconds_until_available, audio_seconds
-        )
-        if wait_seconds <= 0:
-            break
-        if wait_seconds > MAX_AUTOMATIC_LIMIT_WAIT_SECONDS:
-            raise UsageLimitUnavailable(wait_seconds)
-        if wait_callback:
-            await wait_callback(wait_seconds)
-        await asyncio.sleep(wait_seconds + 0.25)
+    """Atomically reserve, count, and send every real Groq HTTP attempt."""
+    filename = os.path.basename(path)
+    # Chunks are normalized to small 32 kbps MP3 files. Reading them directly
+    # avoids keeping a blocking worker occupied across asynchronous retries.
+    audio_bytes = Path(path).read_bytes()
+    for attempt in range(1, GROQ_MAX_ATTEMPTS + 1):
+        while True:
+            wait_seconds = usage_tracker.reserve_attempt(audio_seconds)
+            if wait_seconds <= 0:
+                break
+            if wait_seconds > MAX_AUTOMATIC_LIMIT_WAIT_SECONDS:
+                raise UsageLimitUnavailable(wait_seconds)
+            if wait_callback:
+                await wait_callback(wait_seconds)
+            await asyncio.sleep(wait_seconds + 0.25)
 
-    await asyncio.to_thread(usage_tracker.record_attempt, audio_seconds)
-    transcription = await asyncio.to_thread(_groq_transcription, path)
-    return transcription.text or ""
+        try:
+            transcription = await _groq_transcription(filename, audio_bytes)
+            return transcription.text or ""
+        except Exception as exc:
+            retry_delay = groq_retry_delay(exc, attempt)
+            if retry_delay is None or attempt >= GROQ_MAX_ATTEMPTS:
+                raise
+            status_code = getattr(exc, "status_code", None)
+            logger.warning(
+                "Groq transcription attempt %s/%s failed (status=%s); retrying",
+                attempt,
+                GROQ_MAX_ATTEMPTS,
+                status_code or type(exc).__name__,
+            )
+            if retry_callback:
+                await retry_callback(attempt + 1, GROQ_MAX_ATTEMPTS, retry_delay)
+            await asyncio.sleep(retry_delay)
+
+    raise RuntimeError("Groq transcription attempts exhausted")
+
+
+def groq_retry_delay(exc: Exception, attempt: int) -> Optional[float]:
+    """Return a bounded retry delay for transient Groq failures."""
+    status_code = getattr(exc, "status_code", None)
+    exception_name = type(exc).__name__
+    retryable = (
+        status_code == 429
+        or (isinstance(status_code, int) and status_code >= 500)
+        or exception_name in {"APIConnectionError", "APITimeoutError"}
+    )
+    if not retryable:
+        return None
+
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", {}) if response is not None else {}
+    try:
+        retry_after = float(headers.get("retry-after", 0))
+    except (TypeError, ValueError):
+        retry_after = 0
+    fallback_delays = (2.0, 5.0, 10.0)
+    fallback = fallback_delays[min(max(0, attempt - 1), len(fallback_delays) - 1)]
+    return min(MAX_AUTOMATIC_LIMIT_WAIT_SECONDS, max(retry_after, fallback))
 
 
 # 3. Bot Command Handlers -----------------------------------------------------
@@ -268,7 +347,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update):
         return
-    snapshot = await asyncio.to_thread(usage_tracker.snapshot)
+    snapshot = usage_tracker.snapshot()
     await update.message.reply_text(
         "🎧 Groq hourly audio usage\n\n"
         + audio_metric_text("Main limit: 2 hours per rolling hour", snapshot.audio_hour)
@@ -279,7 +358,7 @@ async def usage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def usage_detailed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update):
         return
-    snapshot = await asyncio.to_thread(usage_tracker.snapshot)
+    snapshot = usage_tracker.snapshot()
     tracking_since = datetime.fromtimestamp(snapshot.tracking_since).astimezone().strftime(
         "%Y-%m-%d %H:%M %Z"
     )
@@ -298,16 +377,31 @@ async def usage_detailed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Receive voice/audio/video, transcribe it, and return the result."""
+    """Run up to two media jobs concurrently without blocking commands."""
     if not is_authorized(update):
         logger.warning(
             "Unauthorized access attempt from User ID: %s", update.effective_user.id
         )
         return
 
+    queued_message = None
+    if media_job_semaphore.locked():
+        queued_message = await update.message.reply_text(
+            "⏳ Two recordings are already being processed. This one is queued."
+        )
+    async with media_job_semaphore:
+        if queued_message:
+            await queued_message.edit_text("▶️ Starting this queued recording now…")
+        await process_media(update, context)
+
+
+async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Receive voice/audio/video, transcribe it, and return the result."""
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     downloaded_path = None
+    local_cache_path = None
     progress_message = None
 
     try:
@@ -340,14 +434,43 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
 
         new_file = await context.bot.get_file(media.file_id)
+        local_cache_path = get_local_cache_path(new_file.file_path)
+        if TELEGRAM_LOCAL_MODE and not local_cache_path:
+            raise PrivacyCleanupError(
+                "Local Bot API returned a media path outside its private data directory"
+            )
         with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
             downloaded_path = temp_file.name
-        await new_file.download_to_drive(downloaded_path)
+        if local_cache_path:
+            # PTB uses synchronous shutil.copyfile for Local Bot API paths.
+            # Offload it so /usage remains responsive during large copies.
+            await asyncio.to_thread(shutil.copyfile, local_cache_path, downloaded_path)
+            cache_deleted = await cleanup_file(
+                local_cache_path, "Local Bot API cached media"
+            )
+            if not cache_deleted:
+                raise PrivacyCleanupError(
+                    "Could not delete Telegram's cached media copy"
+                )
+            local_cache_path = None
+        else:
+            await new_file.download_to_drive(downloaded_path)
 
         duration = await probe_duration(downloaded_path, fallback=declared_duration)
 
         if duration <= CHUNK_SECONDS:
-            text_result = await transcribe_file(downloaded_path, duration)
+            async def keep_typing(
+                _attempt: int, _maximum: int, _delay: float
+            ) -> None:
+                await context.bot.send_chat_action(
+                    chat_id=update.effective_chat.id, action="typing"
+                )
+
+            text_result = await transcribe_file(
+                downloaded_path,
+                duration,
+                retry_callback=keep_typing,
+            )
             if not text_result:
                 await update.message.reply_text("⚠️ Could not hear any speech.")
             else:
@@ -378,8 +501,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         # or daily request allowance is exhausted. The per-minute request limit
         # is intentionally handled between chunks with short automatic pauses.
         while True:
-            capacity_wait = await asyncio.to_thread(
-                usage_tracker.seconds_until_available,
+            capacity_wait = usage_tracker.seconds_until_available(
                 duration,
                 None,
                 estimated_parts,
@@ -420,7 +542,18 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         "The bot will continue automatically."
                     )
 
-                snapshot = await asyncio.to_thread(usage_tracker.snapshot)
+                async def show_retry(
+                    attempt: int,
+                    maximum: int,
+                    delay: float,
+                    part=index,
+                ) -> None:
+                    await progress_message.edit_text(
+                        f"🔄 Groq temporary error on part {part}/{len(chunks)}. "
+                        f"Retry {attempt}/{maximum} in {format_duration(delay)}…"
+                    )
+
+                snapshot = usage_tracker.snapshot()
                 projected = min(
                     snapshot.audio_hour.limit,
                     snapshot.audio_hour.used + max(10.0, chunk_duration),
@@ -432,7 +565,12 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     f"{format_duration(projected)} / 2h"
                 )
                 transcribed_parts.append(
-                    await transcribe_file(chunk_path, chunk_duration, show_wait)
+                    await transcribe_file(
+                        chunk_path,
+                        chunk_duration,
+                        show_wait,
+                        show_retry,
+                    )
                 )
                 await progress_message.edit_text(
                     f"✅ Transcribed part {index}/{len(chunks)}\n"
@@ -471,14 +609,40 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await progress_message.edit_text(message)
         else:
             await update.message.reply_text(message)
+    except PrivacyCleanupError:
+        logger.error("Privacy cleanup failed; transcription was aborted")
+        message = (
+            "❌ Transcription stopped because the bot could not immediately delete "
+            "Telegram’s cached audio copy. No audio was sent to Groq."
+        )
+        if progress_message:
+            await progress_message.edit_text(message)
+        else:
+            await update.message.reply_text(message)
     except Exception as exc:
-        logger.exception("Error processing media: %s", exc)
+        logger.error(
+            "Media processing failed (%s, status=%s)",
+            type(exc).__name__,
+            getattr(exc, "status_code", "not-applicable"),
+        )
         error_text = str(exc).lower()
         if "file is too big" in error_text or "file_too_big" in error_text:
             message = (
                 "❌ Telegram could not deliver this file because it exceeds the hosted "
                 "Bot API’s 20 MB download limit. Send compressed audio or enable the "
                 "Local Bot API server."
+            )
+        elif getattr(exc, "status_code", None) == 429:
+            message = (
+                "⏳ Groq is rate-limiting the account. Every attempt was counted; "
+                "please check /usage and try again after the shown reset time."
+            )
+        elif isinstance(getattr(exc, "status_code", None), int) and getattr(
+            exc, "status_code"
+        ) >= 500:
+            message = (
+                "❌ Groq is temporarily failing to process this audio even after "
+                "retries. The audio has been deleted; please resend it shortly."
             )
         else:
             message = "❌ An error occurred during transcription."
@@ -487,12 +651,17 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         else:
             await update.message.reply_text(message)
     finally:
-        await cleanup_file(downloaded_path)
+        await cleanup_file(downloaded_path, "working media copy")
+        await cleanup_file(local_cache_path, "Local Bot API cached media")
 
 
 # 4. Main Execution -----------------------------------------------------------
 def build_application():
-    builder = ApplicationBuilder().token(BOT_TOKEN)
+    builder = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(UPDATE_CONCURRENCY)
+    )
     if TELEGRAM_LOCAL_MODE:
         builder = (
             builder.base_url(TELEGRAM_BASE_URL)

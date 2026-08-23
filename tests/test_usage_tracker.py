@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from usage_tracker import UsageTracker
@@ -82,6 +83,21 @@ class UsageTrackerTests(unittest.TestCase):
         )
 
         self.assertEqual(wait, 86_300)
+
+    def test_parallel_attempt_reservations_are_atomic(self):
+        def reserve(_index):
+            return self.tracker.reserve_attempt(10, requested_at=1_000)
+
+        with ThreadPoolExecutor(max_workers=21) as executor:
+            waits = list(executor.map(reserve, range(21)))
+
+        self.assertEqual(waits.count(0), UsageTracker.REQUESTS_PER_MINUTE)
+        self.assertEqual(waits.count(60), 1)
+        snapshot = self.tracker.snapshot(now=1_000)
+        self.assertEqual(
+            snapshot.requests_minute.used,
+            UsageTracker.REQUESTS_PER_MINUTE,
+        )
 
 
 if __name__ == "__main__":

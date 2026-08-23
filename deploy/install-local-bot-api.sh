@@ -28,11 +28,14 @@ for command in docker setfacl systemctl; do
     fi
 done
 
-# The container runs Telegram's server as UID/GID 101. A default ACL grants
-# only the host bot user access to files created later, without opening the
-# directory to every local account.
+# The container runs Telegram's server as UID/GID 101. The bot user needs
+# directory traversal, read, and delete access so each cached incoming media
+# file can be unlinked immediately after it is copied to the private workspace.
+# No access is granted to other local accounts.
 install -d -o 101 -g 101 -m 0750 "$DATA_DIRECTORY"
-setfacl -m "u:${BOT_USER}:rx,d:u:${BOT_USER}:rx" "$DATA_DIRECTORY"
+setfacl -R -m "u:${BOT_USER}:rwX" "$DATA_DIRECTORY"
+find "$DATA_DIRECTORY" -type d -exec \
+    setfacl -m "d:u:${BOT_USER}:rwx" {} +
 
 install -o root -g root -m 0644 \
     "$PROJECT_DIR/deploy/telegram-bot-api.service" \

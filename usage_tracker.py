@@ -99,6 +99,57 @@ class UsageTracker:
                 (timestamp - DAY_SECONDS,),
             )
 
+    def reserve_attempt(
+        self, audio_seconds: float, requested_at: Optional[float] = None
+    ) -> float:
+        """Atomically check capacity and record one API attempt.
+
+        Returning zero means the attempt was recorded and may be sent. A
+        positive value is the number of seconds to wait; in that case nothing
+        is recorded. ``BEGIN IMMEDIATE`` makes this safe when several media
+        handlers reach Groq at the same time.
+        """
+        timestamp = time.time() if requested_at is None else float(requested_at)
+        counted_audio = max(MINIMUM_AUDIO_SECONDS, float(audio_seconds))
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT requested_at, audio_seconds
+                    FROM groq_usage
+                    WHERE requested_at > ?
+                    ORDER BY requested_at ASC
+                    """,
+                    (timestamp - DAY_SECONDS,),
+                ).fetchall()
+                events = [
+                    (float(row[0]), float(row[1]))
+                    for row in rows
+                ]
+                wait_seconds = self._availability_wait(
+                    events,
+                    timestamp,
+                    counted_audio,
+                    request_count=1,
+                    include_minute_limit=True,
+                )
+                if wait_seconds <= 0:
+                    connection.execute(
+                        "INSERT INTO groq_usage(requested_at, audio_seconds) "
+                        "VALUES (?, ?)",
+                        (timestamp, counted_audio),
+                    )
+                    connection.execute(
+                        "DELETE FROM groq_usage WHERE requested_at <= ?",
+                        (timestamp - DAY_SECONDS,),
+                    )
+                connection.commit()
+                return wait_seconds
+            except Exception:
+                connection.rollback()
+                raise
+
     def _events(self, now: float) -> Tuple[List[Tuple[float, float]], Optional[float]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -207,9 +258,24 @@ class UsageTracker:
         events, _tracking_since = self._events(timestamp)
         counted_audio = max(MINIMUM_AUDIO_SECONDS, float(audio_seconds))
         planned_requests = max(1, int(request_count))
+        return self._availability_wait(
+            events,
+            timestamp,
+            counted_audio,
+            planned_requests,
+            include_minute_limit,
+        )
+
+    def _availability_wait(
+        self,
+        events: Sequence[Tuple[float, float]],
+        timestamp: float,
+        counted_audio: float,
+        request_count: int,
+        include_minute_limit: bool,
+    ) -> float:
         request_value = lambda _event: 1.0
         audio_value = lambda event: event[1]
-
         waits = []
         if include_minute_limit:
             waits.append(
@@ -218,7 +284,7 @@ class UsageTracker:
                     timestamp,
                     MINUTE_SECONDS,
                     self.REQUESTS_PER_MINUTE,
-                    float(planned_requests),
+                    float(request_count),
                     request_value,
                 )
             )
@@ -229,7 +295,7 @@ class UsageTracker:
                     timestamp,
                     DAY_SECONDS,
                     self.REQUESTS_PER_DAY,
-                    float(planned_requests),
+                    float(request_count),
                     request_value,
                 ),
                 self._capacity_wait(

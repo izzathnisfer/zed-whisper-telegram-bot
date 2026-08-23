@@ -9,10 +9,13 @@ Groq's `whisper-large-v3-turbo` model.
 - Normal copyable Telegram replies for media up to five minutes
 - Ordered five-minute chunks and a merged `.txt` result for longer media
 - Live progress updates while long recordings are prepared and transcribed
+- Two recordings can transcribe concurrently while commands remain responsive
 - Persistent local tracking of all four Groq free-plan limits
+- Atomic rate-limit accounting across parallel jobs and explicit retries
 - Automatic short pauses for the 20-requests-per-minute limit
 - A two-hour maximum for one transcription job
-- Temporary media is deleted after every attempt
+- Incoming cache files are unlinked immediately after the private working copy
+  is made; working audio and generated chunks are deleted on success or failure
 
 ## Commands
 
@@ -78,6 +81,7 @@ run a separate Local Telegram Bot API server and configure:
 TELEGRAM_LOCAL_MODE=true
 TELEGRAM_BASE_URL=http://127.0.0.1:8081/bot
 TELEGRAM_BASE_FILE_URL=http://127.0.0.1:8081/file/bot
+TELEGRAM_LOCAL_DATA_DIR=/var/lib/telegram-bot-api
 ```
 
 The Local Bot API server requires a private Telegram `API_ID` and `API_HASH`.
@@ -85,9 +89,11 @@ Keep them in the server's private environment, never in this repository.
 
 Production deployment templates are provided in `deploy/`. The container image
 is pinned by immutable digest, listens only on `127.0.0.1:8081`, and shares a
-private ACL-protected data directory with the Python bot. Install `docker.io`
-and `acl`, then run `deploy/install-local-bot-api.sh` with `sudo`. Telegram
-requires calling the cloud Bot API `logOut` method before running
+private ACL-protected data directory with the Python bot. The bot only accepts
+cache paths inside that directory and aborts rather than retaining media if an
+immediate cache deletion fails. Install `docker.io` and `acl`, then run
+`deploy/install-local-bot-api.sh` with `sudo`. Telegram requires calling the
+cloud Bot API `logOut` method before running
 `deploy/enable-local-bot-api-for-bot.sh` to complete the cutover.
 
 ## Maintenance
