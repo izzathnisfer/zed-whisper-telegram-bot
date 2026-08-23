@@ -56,6 +56,9 @@ TELEGRAM_BASE_FILE_URL = os.getenv(
 TELEGRAM_LOCAL_DATA_DIR = Path(
     os.getenv("TELEGRAM_LOCAL_DATA_DIR", "/var/lib/telegram-bot-api")
 ).resolve()
+LOCAL_CACHE_DELETE_HELPER = os.getenv(
+    "LOCAL_CACHE_DELETE_HELPER", "/usr/local/libexec/zed-whisper-delete-cache"
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -123,6 +126,29 @@ async def cleanup_file(path: Optional[str], label: str = "temporary media") -> b
     except OSError as exc:
         logger.error("Failed to delete %s (%s)", label, type(exc).__name__)
         return False
+
+
+async def cleanup_local_cache(path: Optional[str]) -> bool:
+    """Delete one validated Local Bot API cache file via the root helper."""
+    if not path:
+        return True
+    process = await asyncio.create_subprocess_exec(
+        "sudo",
+        "-n",
+        LOCAL_CACHE_DELETE_HELPER,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await process.communicate(f"{path}\n".encode())
+    if process.returncode == 0:
+        logger.info("Deleted Local Bot API cached media")
+        return True
+    logger.error(
+        "Failed to delete Local Bot API cached media (helper status=%s)",
+        process.returncode,
+    )
+    return False
 
 
 def format_duration(seconds: float) -> str:
@@ -445,20 +471,16 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             # PTB uses synchronous shutil.copyfile for Local Bot API paths.
             # Offload it so /usage remains responsive during large copies.
             await asyncio.to_thread(shutil.copyfile, local_cache_path, downloaded_path)
-            cache_deleted = await cleanup_file(
-                local_cache_path, "Local Bot API cached media"
-            )
-            if not cache_deleted:
-                raise PrivacyCleanupError(
-                    "Could not delete Telegram's cached media copy"
-                )
-            local_cache_path = None
         else:
             await new_file.download_to_drive(downloaded_path)
 
         duration = await probe_duration(downloaded_path, fallback=declared_duration)
 
         if duration <= CHUNK_SECONDS:
+            # Keep the proven short-audio path unchanged: transcribe the
+            # downloaded media directly and return a normal copyable message.
+            # Both server-side copies are removed by the handler's finally
+            # block immediately after the reply is sent.
             async def keep_typing(
                 _attempt: int, _maximum: int, _delay: float
             ) -> None:
@@ -471,11 +493,6 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 duration,
                 retry_callback=keep_typing,
             )
-            if not await cleanup_file(downloaded_path, "working media copy"):
-                raise PrivacyCleanupError(
-                    "Could not delete the working media copy after transcription"
-                )
-            downloaded_path = None
             if not text_result:
                 await update.message.reply_text("⚠️ Could not hear any speech.")
             else:
@@ -484,6 +501,13 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if progress_message:
                 await progress_message.delete()
             return
+
+        if local_cache_path:
+            if not await cleanup_local_cache(local_cache_path):
+                raise PrivacyCleanupError(
+                    "Could not delete Telegram's cached long-media copy"
+                )
+            local_cache_path = None
 
         if progress_message is None:
             progress_message = await update.message.reply_text(
@@ -670,7 +694,7 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.message.reply_text(message)
     finally:
         await cleanup_file(downloaded_path, "working media copy")
-        await cleanup_file(local_cache_path, "Local Bot API cached media")
+        await cleanup_local_cache(local_cache_path)
 
 
 # 4. Main Execution -----------------------------------------------------------

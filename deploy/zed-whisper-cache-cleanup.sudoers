@@ -1,0 +1,1 @@
+ubuntu ALL=(root) NOPASSWD: /usr/local/libexec/zed-whisper-delete-cache

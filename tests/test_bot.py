@@ -116,6 +116,128 @@ class BotHelperTests(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_local_cache_helper_receives_sensitive_path_only_on_stdin(self):
+        async def run_test():
+            calls = []
+
+            class FakeProcess:
+                returncode = 0
+
+                async def communicate(self, input_bytes):
+                    calls.append(input_bytes)
+                    return b"", b""
+
+            async def fake_subprocess(*args, **kwargs):
+                calls.append((args, kwargs))
+                return FakeProcess()
+
+            sensitive_path = "/var/lib/telegram-bot-api/sensitive/cache.ogg"
+            with patch.object(
+                bot.asyncio,
+                "create_subprocess_exec",
+                new=fake_subprocess,
+            ):
+                deleted = await bot.cleanup_local_cache(sensitive_path)
+
+            self.assertTrue(deleted)
+            process_args, process_kwargs = calls[0]
+            self.assertEqual(
+                process_args,
+                ("sudo", "-n", bot.LOCAL_CACHE_DELETE_HELPER),
+            )
+            self.assertNotIn(sensitive_path, process_args)
+            self.assertEqual(process_kwargs["stderr"], asyncio.subprocess.DEVNULL)
+            self.assertEqual(calls[1], f"{sensitive_path}\n".encode())
+
+        asyncio.run(run_test())
+
+    def test_short_audio_transcribes_and_replies_before_cache_cleanup(self):
+        async def run_test():
+            events = []
+
+            class Media:
+                duration = 90
+                file_size = 1_000
+                file_id = "voice-file"
+
+            class Message:
+                voice = Media()
+                audio = None
+                video = None
+                video_note = None
+
+                async def reply_text(self, _text, **_kwargs):
+                    events.append("copyable_reply")
+
+            class Bot:
+                async def send_chat_action(self, **_kwargs):
+                    events.append("typing")
+
+                async def get_file(self, _file_id):
+                    return local_file
+
+            class LocalFile:
+                file_path = ""
+
+            local_file = LocalFile()
+            update = SimpleNamespace(
+                message=Message(),
+                effective_chat=SimpleNamespace(id=1),
+                effective_user=SimpleNamespace(first_name="Owner"),
+            )
+            context = SimpleNamespace(bot=Bot())
+
+            async def fake_probe(_path, fallback=None):
+                return float(fallback)
+
+            async def fake_to_thread(function, *args):
+                return function(*args)
+
+            async def fake_transcribe(_path, _duration, **_kwargs):
+                events.append("transcribe")
+                return "short transcript"
+
+            async def fake_cleanup(path, _label):
+                events.append("working_cleanup")
+                Path(path).unlink(missing_ok=True)
+                return True
+
+            async def fake_cache_cleanup(_path):
+                events.append("cache_cleanup")
+                return True
+
+            original_mode = bot.TELEGRAM_LOCAL_MODE
+            original_directory = bot.TELEGRAM_LOCAL_DATA_DIR
+            try:
+                with tempfile.TemporaryDirectory() as directory:
+                    bot.TELEGRAM_LOCAL_MODE = True
+                    bot.TELEGRAM_LOCAL_DATA_DIR = Path(directory).resolve()
+                    cache_path = Path(directory) / "voice" / "cache.ogg"
+                    cache_path.parent.mkdir()
+                    cache_path.write_bytes(b"voice")
+                    local_file.file_path = str(cache_path)
+
+                    with (
+                        patch.object(bot.asyncio, "to_thread", new=fake_to_thread),
+                        patch.object(bot, "probe_duration", new=fake_probe),
+                        patch.object(bot, "transcribe_file", new=fake_transcribe),
+                        patch.object(bot, "cleanup_file", new=fake_cleanup),
+                        patch.object(
+                            bot,
+                            "cleanup_local_cache",
+                            new=fake_cache_cleanup,
+                        ),
+                    ):
+                        await bot.process_media(update, context)
+            finally:
+                bot.TELEGRAM_LOCAL_MODE = original_mode
+                bot.TELEGRAM_LOCAL_DATA_DIR = original_directory
+
+            self.assertLess(events.index("transcribe"), events.index("copyable_reply"))
+            self.assertLess(events.index("copyable_reply"), events.index("cache_cleanup"))
+
+        asyncio.run(run_test())
+
     def test_local_cache_path_must_stay_inside_private_data_directory(self):
         original_mode = bot.TELEGRAM_LOCAL_MODE
         original_directory = bot.TELEGRAM_LOCAL_DATA_DIR

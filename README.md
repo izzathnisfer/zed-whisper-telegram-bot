@@ -89,9 +89,10 @@ Keep them in the server's private environment, never in this repository.
 
 Production deployment templates are provided in `deploy/`. The container image
 is pinned by immutable digest, listens only on `127.0.0.1:8081`, and shares a
-private ACL-protected data directory with the Python bot. The bot only accepts
-cache paths inside that directory and aborts rather than retaining media if an
-immediate cache deletion fails. Install `docker.io` and `acl`, then run
+private ACL-protected data directory with the Python bot. A root-owned cleanup
+helper receives the sensitive cache path only through stdin, validates that it
+resolves inside that directory, refuses state/database files, and unlinks the
+exact incoming media file. Install `docker.io` and `acl`, then run
 `deploy/install-local-bot-api.sh` with `sudo`. Telegram requires calling the
 cloud Bot API `logOut` method before running
 `deploy/enable-local-bot-api-for-bot.sh` to complete the cutover.
