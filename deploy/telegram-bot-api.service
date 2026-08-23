@@ -14,6 +14,7 @@ ExecStart=/usr/bin/docker run --rm --name telegram-bot-api \
     --volume /var/lib/telegram-bot-api:/var/lib/telegram-bot-api \
     --env-file /etc/zed-whisper-bot/telegram-bot-api.env \
     --env TELEGRAM_LOCAL=1 \
+    --env TELEGRAM_VERBOSITY=1 \
     --memory 512m \
     --cpus 1.0 \
     --pids-limit 256 \
