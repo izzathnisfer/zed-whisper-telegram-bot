@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for tested Zed Whisper Telegram Bot deployments
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

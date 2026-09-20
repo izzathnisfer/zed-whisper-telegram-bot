@@ -1,0 +1,10 @@
+[Unit]
+Description=Deploy tested Zed Whisper Telegram Bot commits
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/zed-whisper-telegram-bot
+ExecStart=/usr/local/bin/zed-whisper-auto-deploy
