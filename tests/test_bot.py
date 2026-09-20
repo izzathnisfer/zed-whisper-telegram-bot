@@ -238,6 +238,97 @@ class BotHelperTests(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_long_audio_document_uses_original_filename(self):
+        async def run_test():
+            captured = {}
+
+            class Media:
+                duration = 301
+                file_size = 1_000
+                file_id = "audio-file"
+                file_name = "Project Update.mp3"
+
+            class ProgressMessage:
+                async def edit_text(self, _text):
+                    return None
+
+                async def delete(self):
+                    return None
+
+            class Message:
+                voice = None
+                audio = Media()
+                video = None
+                video_note = None
+
+                async def reply_text(self, _text, **_kwargs):
+                    return ProgressMessage()
+
+                async def reply_document(self, **kwargs):
+                    captured["filename"] = kwargs["document"].filename
+
+            class LocalFile:
+                file_path = "https://telegram.invalid/file.mp3"
+
+                async def download_to_drive(self, path):
+                    Path(path).write_bytes(b"audio")
+
+            class Bot:
+                async def get_file(self, _file_id):
+                    return LocalFile()
+
+                async def send_chat_action(self, **_kwargs):
+                    return None
+
+            class Tracker:
+                def seconds_until_available(self, *_args, **_kwargs):
+                    return 0
+
+                def snapshot(self):
+                    return SimpleNamespace(
+                        audio_hour=SimpleNamespace(limit=7_200, used=0)
+                    )
+
+            async def fake_probe(_path, fallback=None):
+                return float(fallback)
+
+            async def fake_split(_path, output_directory):
+                chunks = []
+                for index in range(2):
+                    chunk = Path(output_directory) / f"chunk_{index:04d}.mp3"
+                    chunk.write_bytes(b"chunk")
+                    chunks.append(str(chunk))
+                return chunks
+
+            async def fake_transcribe(*_args, **_kwargs):
+                return "transcribed part"
+
+            async def fake_cleanup(path, _label):
+                if path:
+                    Path(path).unlink(missing_ok=True)
+                return True
+
+            update = SimpleNamespace(
+                message=Message(),
+                effective_chat=SimpleNamespace(id=1),
+                effective_user=SimpleNamespace(first_name="Owner"),
+            )
+            context = SimpleNamespace(bot=Bot())
+
+            with (
+                patch.object(bot, "TELEGRAM_LOCAL_MODE", False),
+                patch.object(bot, "usage_tracker", Tracker()),
+                patch.object(bot, "probe_duration", new=fake_probe),
+                patch.object(bot, "split_media", new=fake_split),
+                patch.object(bot, "transcribe_file", new=fake_transcribe),
+                patch.object(bot, "cleanup_file", new=fake_cleanup),
+            ):
+                await bot.process_media(update, context)
+
+            self.assertEqual(captured["filename"], "Project Update.mp3.txt")
+
+        asyncio.run(run_test())
+
     def test_local_cache_path_must_stay_inside_private_data_directory(self):
         original_mode = bot.TELEGRAM_LOCAL_MODE
         original_directory = bot.TELEGRAM_LOCAL_DATA_DIR

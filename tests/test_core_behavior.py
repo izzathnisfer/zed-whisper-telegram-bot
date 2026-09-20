@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -32,6 +33,32 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertIs(media, audio)
         self.assertEqual(suffix, ".m4a")
         self.assertEqual(label, "audio file")
+
+    def test_transcription_filename_preserves_uploaded_filename(self):
+        media = SimpleNamespace(file_name="Project Update.mp3")
+        self.assertEqual(
+            bot.transcription_filename(media, ".mp3", "audio file"),
+            "Project Update.mp3.txt",
+        )
+
+    def test_transcription_filename_uses_safe_basename(self):
+        media = SimpleNamespace(file_name="folder/meeting.m4a")
+        self.assertEqual(
+            bot.transcription_filename(media, ".m4a", "audio file"),
+            "meeting.m4a.txt",
+        )
+
+    def test_voice_note_transcription_filename_has_clear_fallback(self):
+        media = SimpleNamespace()
+        self.assertEqual(
+            bot.transcription_filename(
+                media,
+                ".ogg",
+                "voice note",
+                now=datetime(2026, 9, 20, 12, 34, 56),
+            ),
+            "voice_note_20260920_123456.ogg.txt",
+        )
 
     def test_unknown_media_is_rejected(self):
         message = SimpleNamespace(

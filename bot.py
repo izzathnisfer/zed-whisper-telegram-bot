@@ -207,6 +207,24 @@ def get_media_details(message) -> Tuple[object, str, str]:
     raise ValueError("Unknown media type")
 
 
+def transcription_filename(
+    media: object,
+    file_ext: str,
+    media_label: str,
+    now: Optional[datetime] = None,
+) -> str:
+    """Keep an uploaded media filename and append .txt to the full name."""
+    original_name = getattr(media, "file_name", None)
+    if original_name and str(original_name).strip():
+        safe_name = Path(str(original_name).replace("\\", "/")).name
+        if safe_name:
+            return f"{safe_name}.txt"
+
+    timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    fallback_label = media_label.replace(" ", "_")
+    return f"{fallback_label}_{timestamp}{file_ext}.txt"
+
+
 async def probe_duration(path: str, fallback: Optional[float] = None) -> float:
     process = await asyncio.create_subprocess_exec(
         "ffprobe",
@@ -628,7 +646,7 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
             output_path = Path(chunk_directory) / "transcription.txt"
             output_path.write_text(text_result + "\n", encoding="utf-8")
-            filename = datetime.now().strftime("transcription_%Y%m%d_%H%M%S.txt")
+            filename = transcription_filename(media, file_ext, media_label)
             with output_path.open("rb") as output_file:
                 await update.message.reply_document(
                     document=InputFile(output_file, filename=filename),
