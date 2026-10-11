@@ -1,6 +1,6 @@
 # Private Groq-Powered Telegram Transcription Bot
 
-A private Telegram bot that transcribes voice notes, audio, and video using
+A fast, private Telegram bot that transcribes voice notes, audio, and video using
 Groq's `whisper-large-v3-turbo` model.
 
 ## Features
