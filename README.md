@@ -23,6 +23,8 @@ Groq's `whisper-large-v3-turbo` model.
 - `/usage` — show the primary two-hours-per-rolling-hour audio meter
 - `/usage_detailed` — show audio/hour, audio/day, requests/minute, and
   requests/day with progress bars and remaining capacity
+- `/language [code|auto]` — view or set transcription language (e.g. `/language ta` for Tamil, `/language auto` for auto-detect)
+- `/version` — show current bot version (`v2.0.1`) and release changelog
 
 Usage is stored in `data/groq_usage.sqlite3` by default and survives bot
 restarts. Tracking begins when this version first starts; it cannot reconstruct

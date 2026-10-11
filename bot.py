@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime
@@ -29,6 +30,8 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
 GROQ_MODEL = "whisper-large-v3-turbo"
+BOT_VERSION = "2.0.1"
+__version__ = BOT_VERSION
 
 CHUNK_SECONDS = 5 * 60
 TELEGRAM_DOWNLOAD_LIMIT_BYTES = 20_000_000
@@ -40,6 +43,10 @@ UPDATE_CONCURRENCY = 8
 PROJECT_DIR = Path(__file__).resolve().parent
 USAGE_DB_PATH = os.getenv(
     "USAGE_DB_PATH", str(PROJECT_DIR / "data" / "groq_usage.sqlite3")
+)
+DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "auto").strip().lower()
+LANGUAGE_STATE_PATH = os.getenv(
+    "LANGUAGE_STATE_PATH", str(PROJECT_DIR / "data" / "selected_language.txt")
 )
 
 # These optional settings make the bot ready for a separately installed local
@@ -298,12 +305,33 @@ async def split_media(input_path: str, output_directory: str) -> list[str]:
     return chunks
 
 
+def get_active_language() -> str:
+    try:
+        if os.path.exists(LANGUAGE_STATE_PATH):
+            with open(LANGUAGE_STATE_PATH, "r", encoding="utf-8") as f:
+                lang = f.read().strip().lower()
+                if lang:
+                    return lang
+    except Exception:
+        pass
+    return DEFAULT_LANGUAGE or "auto"
+
+
+def set_active_language(lang: str) -> None:
+    clean_lang = lang.strip().lower()
+    path = Path(LANGUAGE_STATE_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(clean_lang, encoding="utf-8")
+
+
 async def _groq_transcription(filename: str, audio_bytes: bytes):
+    lang = get_active_language()
+    groq_lang = None if (not lang or lang == "auto") else lang
     return await client.audio.transcriptions.create(
         file=(filename, audio_bytes),
         model=GROQ_MODEL,
         response_format="json",
-        language=None,
+        language=groq_lang,
         temperature=0.0,
     )
 
@@ -382,8 +410,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id=update.effective_chat.id,
         text=(
             "👋 I am ready! Send me a voice note, audio file, or video and I will "
-            "transcribe it using Groq.\n\nUse /usage for the main hourly allowance "
-            "or /usage_detailed for all limits."
+            "transcribe it using Groq.\n\nUse /usage for hourly allowance, "
+            "/usage_detailed for all limits, /language for language settings, "
+            "or /version to see bot version and changelog."
         ),
     )
 
@@ -418,6 +447,90 @@ async def usage_detailed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ),
     ]
     await update.message.reply_text("\n\n".join(sections))
+
+
+async def language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_authorized(update):
+        return
+    current = get_active_language()
+    args = context.args or []
+    if not args:
+        display_current = "Auto-detect (auto)" if current == "auto" else current.upper()
+        help_text = (
+            f"🌐 Current transcription language: *{display_current}*\n\n"
+            "To change the language, use:\n"
+            "• `/language auto` — Auto-detect language (default)\n"
+            "• `/language ta` — Force Tamil (தமிழ்)\n"
+            "• `/language en` — Force English\n"
+            "• `/language <code>` — Any ISO-639-1 code (e.g. `si`, `hi`, `es`, `fr`)\n\n"
+            "💡 *Tip for Tamil calls*: Forcing `/language ta` prevents Whisper "
+            "from translating phone conversations with English tech jargon into English."
+        )
+        await update.message.reply_text(help_text, parse_mode="Markdown")
+        return
+
+    new_lang = args[0].strip().lower()
+    if new_lang != "auto" and not (new_lang.isalnum() and 2 <= len(new_lang) <= 3):
+        await update.message.reply_text(
+            "❌ Invalid language code. Please specify `auto` or a 2-3 letter code like `ta`, `en`, `si`, `hi`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    set_active_language(new_lang)
+    if new_lang == "auto":
+        msg = (
+            "✅ Transcription language set to: *Auto-detect (auto)*\n\n"
+            "Whisper will automatically detect the spoken language for each recording."
+        )
+    elif new_lang == "ta":
+        msg = (
+            "✅ Transcription language set to: *Tamil (ta - தமிழ்)*\n\n"
+            "All incoming voice notes and audio will now be transcribed in Tamil."
+        )
+    else:
+        msg = (
+            f"✅ Transcription language set to: *{new_lang.upper()}*\n\n"
+            f"All incoming audio will be transcribed in `{new_lang}`."
+        )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+def get_version_changelog(ver: str = BOT_VERSION) -> str:
+    changelog_file = PROJECT_DIR / "CHANGELOG.md"
+    if changelog_file.is_file():
+        try:
+            content = changelog_file.read_text(encoding="utf-8")
+            pattern = re.compile(
+                rf"^##\s+\[{re.escape(ver)}\][^\n]*\n(.*?)(?=^##\s+\[|\Z)",
+                re.MULTILINE | re.DOTALL,
+            )
+            match = pattern.search(content)
+            if match:
+                return match.group(1).strip()
+        except Exception:
+            pass
+    return (
+        "### Added\n"
+        "- /language [code|auto] command to configure or force transcription language (auto, ta, en, etc.).\n"
+        "- Persistent language configuration stored in data/selected_language.txt surviving restarts.\n"
+        "- Support for forcing Tamil (/language ta) to prevent Whisper from translating phone conversations.\n"
+        "- /version command to view the running bot version and release changelog.\n"
+        "- CHANGELOG.md to track version history and release notes."
+    )
+
+
+async def version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_authorized(update):
+        return
+    notes = get_version_changelog(BOT_VERSION)
+    message = (
+        f"🤖 Zed Whisper Telegram Bot\n"
+        f"🔖 Version: v{BOT_VERSION}\n\n"
+        f"📋 Changelog (v{BOT_VERSION}):\n\n"
+        f"{notes}"
+    )
+    await update.message.reply_text(message)
 
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -733,6 +846,8 @@ def build_application():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("usage", usage))
     application.add_handler(CommandHandler("usage_detailed", usage_detailed))
+    application.add_handler(CommandHandler(["language", "lang"], language), group=1)
+    application.add_handler(CommandHandler(["version", "changelog"], version), group=1)
     media_filter = filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE
     application.add_handler(MessageHandler(media_filter, handle_media))
     return application

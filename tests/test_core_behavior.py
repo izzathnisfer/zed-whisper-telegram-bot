@@ -80,5 +80,28 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertEqual(delay, bot.MAX_AUTOMATIC_LIMIT_WAIT_SECONDS)
 
 
+    def test_default_language_is_auto(self):
+        with patch.object(bot, "LANGUAGE_STATE_PATH", "/tmp/non-existent-lang.txt"):
+            self.assertEqual(bot.get_active_language(), "auto")
+
+    def test_language_persistence_and_reset(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_path = os.path.join(tmp_dir, "selected_language.txt")
+            with patch.object(bot, "LANGUAGE_STATE_PATH", temp_path):
+                bot.set_active_language("ta")
+                self.assertEqual(bot.get_active_language(), "ta")
+                bot.set_active_language("auto")
+                self.assertEqual(bot.get_active_language(), "auto")
+
+
+    def test_version_and_changelog_retrieval(self):
+        self.assertEqual(bot.BOT_VERSION, "2.0.1")
+        self.assertEqual(bot.__version__, "2.0.1")
+        changelog = bot.get_version_changelog("2.0.1")
+        self.assertIn("language", changelog.lower())
+        self.assertIn("version", changelog.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
