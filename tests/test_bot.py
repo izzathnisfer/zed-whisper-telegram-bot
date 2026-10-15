@@ -58,7 +58,7 @@ class BotHelperTests(unittest.TestCase):
                         "-f",
                         "lavfi",
                         "-i",
-                        "sine=frequency=440:duration=5",
+                        "sine=frequency=440:duration=6",
                         "-c:a",
                         "libopus",
                         "-b:a",
@@ -68,12 +68,11 @@ class BotHelperTests(unittest.TestCase):
                     check=True,
                 )
 
-                original_chunk_seconds = bot.CHUNK_SECONDS
-                bot.CHUNK_SECONDS = 2
-                try:
-                    chunks = await bot.split_media(str(source), str(chunks_directory))
-                finally:
-                    bot.CHUNK_SECONDS = original_chunk_seconds
+                chunks = await bot.split_media(
+                    str(source),
+                    str(chunks_directory),
+                    [2.0, 2.0, 2.0],
+                )
 
                 self.assertEqual([Path(path).name for path in chunks], [
                     "chunk_0000.mp3",
@@ -103,6 +102,34 @@ class BotHelperTests(unittest.TestCase):
                     self.assertIn("channels=1", codec)
 
         asyncio.run(run_test())
+
+    def test_chunk_plan_absorbs_up_to_thirty_second_remainder(self):
+        cases = {
+            300: [300.0],
+            320: [320.0],
+            330: [330.0],
+            331: [300.0, 31.0],
+            610: [300.0, 310.0],
+            630: [300.0, 330.0],
+            631: [300.0, 300.0, 31.0],
+            2100: [300.0] * 7,
+            2101: [300.0] * 6 + [301.0],
+            2130: [300.0] * 6 + [330.0],
+            2131: [300.0] * 7 + [31.0],
+        }
+
+        for duration, expected in cases.items():
+            with self.subTest(duration=duration):
+                self.assertEqual(bot.plan_chunk_durations(duration), expected)
+                self.assertAlmostEqual(sum(expected), duration)
+                self.assertLessEqual(max(expected), 330.0)
+
+    def test_chunk_plan_absorbs_mp3_frame_padding_at_exact_boundary(self):
+        planned = bot.plan_chunk_durations(2100.072)
+
+        self.assertEqual(len(planned), 7)
+        self.assertAlmostEqual(sum(planned), 2100.072, places=3)
+        self.assertLessEqual(planned[-1], 330.0)
 
     def test_cleanup_immediately_unlinks_media(self):
         async def run_test():
@@ -292,7 +319,7 @@ class BotHelperTests(unittest.TestCase):
             async def fake_probe(_path, fallback=None):
                 return float(fallback)
 
-            async def fake_split(_path, output_directory):
+            async def fake_split(_path, output_directory, _chunk_durations):
                 chunks = []
                 for index in range(2):
                     chunk = Path(output_directory) / f"chunk_{index:04d}.mp3"

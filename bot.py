@@ -34,6 +34,7 @@ BOT_VERSION = "2.0.1"
 __version__ = BOT_VERSION
 
 CHUNK_SECONDS = 5 * 60
+FINAL_CHUNK_GRACE_SECONDS = 30
 TELEGRAM_DOWNLOAD_LIMIT_BYTES = 20_000_000
 MAX_AUTOMATIC_LIMIT_WAIT_SECONDS = 70
 GROQ_MAX_ATTEMPTS = 4
@@ -259,12 +260,45 @@ async def probe_duration(path: str, fallback: Optional[float] = None) -> float:
     raise RuntimeError(f"Could not determine media duration: {stderr.decode().strip()}")
 
 
-async def split_media(input_path: str, output_directory: str) -> list[str]:
-    # Re-encode instead of segmenting the original container. Groq has returned
-    # HTTP 500 for segmented FLAC files even when FFprobe can read them; a mono,
-    # constant-bitrate MP3 is both small and broadly accepted by the endpoint.
+def plan_chunk_durations(duration: float) -> list[float]:
+    """Plan 5-minute chunks while allowing the final chunk up to 5m30s."""
+    duration = max(0.0, float(duration))
+    if duration <= 0:
+        return []
+
+    full_chunks = int(duration // CHUNK_SECONDS)
+    remainder = duration - (full_chunks * CHUNK_SECONDS)
+
+    if full_chunks == 0:
+        return [duration]
+
+    chunks = [float(CHUNK_SECONDS)] * full_chunks
+    # Absorb up to 30 seconds into the last normal chunk. This prevents MP3
+    # frame padding around exact 5-minute boundaries from becoming a tiny
+    # extra Groq request, while keeping every planned chunk <= 5m30s.
+    if remainder > 0.001:
+        if remainder <= FINAL_CHUNK_GRACE_SECONDS:
+            chunks[-1] += remainder
+        else:
+            chunks.append(remainder)
+    return chunks
+
+
+async def split_media(
+    input_path: str,
+    output_directory: str,
+    chunk_durations: list[float],
+) -> list[str]:
+    """Re-encode media into exactly the planned number of MP3 chunks."""
+    if not chunk_durations:
+        raise ValueError("chunk_durations must contain at least one chunk")
+
+    # Use explicit split times rather than FFmpeg's repeating segment_time.
+    # Repeating segmentation can create a tiny extra MP3 at EOF because of
+    # encoder frame padding; explicit boundaries leave that padding in the
+    # planned final chunk instead.
     output_pattern = str(Path(output_directory) / "chunk_%04d.mp3")
-    process = await asyncio.create_subprocess_exec(
+    args = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
@@ -285,13 +319,28 @@ async def split_media(input_path: str, output_directory: str) -> list[str]:
         "32k",
         "-map_metadata",
         "-1",
-        "-f",
-        "segment",
-        "-segment_time",
-        str(CHUNK_SECONDS),
-        "-reset_timestamps",
-        "1",
-        output_pattern,
+    ]
+
+    if len(chunk_durations) == 1:
+        args.append(output_pattern.replace("%04d", "0000"))
+    else:
+        cumulative = 0.0
+        split_times = []
+        for chunk_duration in chunk_durations[:-1]:
+            cumulative += chunk_duration
+            split_times.append(f"{cumulative:.3f}")
+        args.extend([
+            "-f",
+            "segment",
+            "-segment_times",
+            ",".join(split_times),
+            "-reset_timestamps",
+            "1",
+            output_pattern,
+        ])
+
+    process = await asyncio.create_subprocess_exec(
+        *args,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -300,8 +349,11 @@ async def split_media(input_path: str, output_directory: str) -> list[str]:
         raise RuntimeError(f"ffmpeg could not split the media: {stderr.decode().strip()}")
 
     chunks = sorted(str(path) for path in Path(output_directory).glob("chunk_*.mp3"))
-    if not chunks:
-        raise RuntimeError("ffmpeg did not produce any audio chunks")
+    if len(chunks) != len(chunk_durations):
+        raise RuntimeError(
+            "ffmpeg produced an unexpected number of audio chunks "
+            f"({len(chunks)} instead of {len(chunk_durations)})"
+        )
     return chunks
 
 
@@ -654,7 +706,8 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        estimated_parts = math.ceil(duration / CHUNK_SECONDS)
+        chunk_durations = plan_chunk_durations(duration)
+        estimated_parts = len(chunk_durations)
 
         # Reserve enough room conceptually before beginning so a long job never
         # transcribes only some chunks and then discovers the hourly/daily audio
@@ -683,7 +736,11 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"✂️ Splitting {format_duration(duration)} into "
                 f"{estimated_parts} ordered parts…"
             )
-            chunks = await split_media(downloaded_path, chunk_directory)
+            chunks = await split_media(
+                downloaded_path,
+                chunk_directory,
+                chunk_durations,
+            )
             if not await cleanup_file(downloaded_path, "source working media"):
                 raise PrivacyCleanupError(
                     "Could not delete source media after creating private chunks"
@@ -691,14 +748,10 @@ async def process_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             downloaded_path = None
             transcribed_parts = []
 
-            for index, chunk_path in enumerate(chunks, start=1):
-                # Some segmented FLAC containers expose missing or inherited
-                # duration metadata. Derive each part from the already-probed
-                # source duration so quota accounting stays correct.
-                chunk_duration = min(
-                    CHUNK_SECONDS,
-                    max(1, duration - (index - 1) * CHUNK_SECONDS),
-                )
+            for index, (chunk_path, chunk_duration) in enumerate(
+                zip(chunks, chunk_durations),
+                start=1,
+            ):
 
                 async def show_wait(wait_seconds: float, part=index) -> None:
                     await progress_message.edit_text(
