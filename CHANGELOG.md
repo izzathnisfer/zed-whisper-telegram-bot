@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-10-15
+
+### Fixed
+- Prevented FFmpeg MP3 frame padding at exact 5-minute boundaries from creating a tiny extra trailing chunk that Groq could reject with HTTP 400.
+- Long-media chunk planning now allows the final chunk to absorb up to 30 extra seconds (maximum 5m30s), while longer remainders are split normally.
+- Groq quota preflight and per-chunk accounting now use the same deterministic chunk plan used for transcription.
+
 ## [2.0.1] - 2026-10-11
 
 ### Added
