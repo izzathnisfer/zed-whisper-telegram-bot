@@ -30,7 +30,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
 GROQ_MODEL = "whisper-large-v3-turbo"
-BOT_VERSION = "2.0.1"
+BOT_VERSION = "2.0.2"
 __version__ = BOT_VERSION
 
 CHUNK_SECONDS = 5 * 60
