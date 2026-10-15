@@ -96,11 +96,11 @@ class CoreBehaviorTests(unittest.TestCase):
 
 
     def test_version_and_changelog_retrieval(self):
-        self.assertEqual(bot.BOT_VERSION, "2.0.1")
-        self.assertEqual(bot.__version__, "2.0.1")
-        changelog = bot.get_version_changelog("2.0.1")
-        self.assertIn("language", changelog.lower())
-        self.assertIn("version", changelog.lower())
+        self.assertEqual(bot.BOT_VERSION, "2.0.2")
+        self.assertEqual(bot.__version__, "2.0.2")
+        changelog = bot.get_version_changelog("2.0.2")
+        self.assertIn("chunk", changelog.lower())
+        self.assertIn("groq", changelog.lower())
 
 
 if __name__ == "__main__":
